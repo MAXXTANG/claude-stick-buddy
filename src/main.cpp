@@ -290,6 +290,7 @@ static void sendPermission(const char* decision) {
   d["id"] = hb.promptId;
   d["decision"] = decision;
   String s; serializeJson(d, s);
+  Serial.printf("[tx] %s\n", s.c_str());
   notifyLine(s);
 }
 
@@ -926,8 +927,10 @@ void loop() {
         confirmActiveChoice();
       } else if (M5.BtnB.wasPressed()) {
         activeChoice = (activeChoice == Choice::Approve) ? Choice::Deny : Choice::Approve;
+        Serial.printf("[btn] B cycle -> %s\n", activeChoice == Choice::Approve ? "Approve" : "Deny");
         drawPromptChrome(/*fullClear=*/false);
       } else if (M5.BtnA.wasPressed()) {
+        Serial.println("[btn] A confirm");
         confirmActiveChoice();
       } else {
         tickGifPlayback();
