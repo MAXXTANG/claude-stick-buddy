@@ -50,6 +50,20 @@ struct Heartbeat {
 };
 
 static Heartbeat hb;
+
+// Real rate-limit usage pushed by the local bridge (tools/usage_bridge.py)
+// over the shared BLE link — the official desktop heartbeat carries no
+// usage %/reset fields. Goes stale after 5 min; the idle screen then
+// falls back to the token-estimate bars.
+struct UsageState {
+  bool fresh = false;
+  uint32_t lastMs = 0;
+  int sessionPct = -1;   // Current session utilization %
+  int weekPct = -1;      // Weekly limit utilization %
+  int resetMin = -1;     // minutes until session reset, as of lastMs
+};
+static UsageState usage;
+
 static UIMode mode = UIMode::IdleDisconnected;
 static uint32_t modeEnteredMs = 0;
 static Choice activeChoice = Choice::Approve;
@@ -438,9 +452,8 @@ static constexpr uint32_t TOKEN_BUDGET_SESSION = 200000;
 static constexpr uint32_t TOKEN_BUDGET_DAILY   = 1000000;
 
 // One labelled usage bar: label left, % right, bar between.
-static void drawUsageBar(const char* label, uint32_t used, uint32_t budget, int y) {
+static void drawPctBar(const char* label, unsigned pct, int y) {
   auto& d = M5.Display;
-  unsigned pct = budget ? (unsigned)((uint64_t)used * 100 / budget) : 0;
   if (pct > 999) pct = 999;
   d.setFont(FONT_UI);
   d.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
@@ -481,19 +494,43 @@ static void drawIdleGlance() {
   d.drawString(hb.fresh ? "已連線" : "待機中", 4, y);
   if (muted) drawMuteBadge(d.width() - 18, y + 2);
   y += 16;
-  drawUsageBar("本次", hb.tokens, TOKEN_BUDGET_SESSION, y);      y += 16;
-  drawUsageBar("今日", hb.tokensToday, TOKEN_BUDGET_DAILY, y);   y += 16;
-  if (hb.fresh) {
-    d.setTextColor(TFT_CYAN);
-    char counts[48];
-    snprintf(counts, sizeof(counts), "共%d 執行%d 等待%d", hb.total, hb.running, hb.waiting);
-    d.drawString(counts, 4, y); y += 16;
+  if (usage.fresh) {
+    // Real rate-limit numbers from the local bridge.
+    if (usage.sessionPct >= 0) { drawPctBar("當前", usage.sessionPct, y); y += 16; }
+    if (usage.weekPct >= 0)    { drawPctBar("本週", usage.weekPct, y);    y += 16; }
+    if (usage.resetMin >= 0) {
+      long left = usage.resetMin - (long)((millis() - usage.lastMs) / 60000);
+      if (left < 0) left = 0;
+      char rs[40];
+      if (left >= 60) snprintf(rs, sizeof(rs), "重置 %ld時%ld分", left / 60, left % 60);
+      else            snprintf(rs, sizeof(rs), "重置 %ld分", left);
+      d.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+      d.drawString(rs, 4, y); y += 16;
+    }
+    if (hb.fresh) {
+      d.setTextColor(TFT_CYAN);
+      char counts[48];
+      snprintf(counts, sizeof(counts), "共%d 執行%d 等待%d", hb.total, hb.running, hb.waiting);
+      d.drawString(counts, 4, y); y += 16;
+    }
+  } else {
+    // Fallback: token-count estimate against the adjustable budgets.
+    unsigned p1 = (unsigned)((uint64_t)hb.tokens * 100 / TOKEN_BUDGET_SESSION);
+    unsigned p2 = (unsigned)((uint64_t)hb.tokensToday * 100 / TOKEN_BUDGET_DAILY);
+    drawPctBar("本次", p1, y);  y += 16;
+    drawPctBar("今日", p2, y);  y += 16;
+    if (hb.fresh) {
+      d.setTextColor(TFT_CYAN);
+      char counts[48];
+      snprintf(counts, sizeof(counts), "共%d 執行%d 等待%d", hb.total, hb.running, hb.waiting);
+      d.drawString(counts, 4, y); y += 16;
+    }
+    d.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    char st[40];
+    snprintf(st, sizeof(st), "核准%lu 拒絕%lu",
+             (unsigned long)statApprove, (unsigned long)statDeny);
+    d.drawString(st, 4, y);
   }
-  d.setTextColor(TFT_DARKGREY, TFT_BLACK);
-  char st[40];
-  snprintf(st, sizeof(st), "核准%lu 拒絕%lu",
-           (unsigned long)statApprove, (unsigned long)statDeny);
-  d.drawString(st, 4, y);
   d.endWrite();
   if (!gifOpen) startGifPlayback();   // mascot lives on the idle screen
 }
@@ -692,6 +729,15 @@ static void handleLine(const String& line) {
     Serial.println("[ble] unpair requested by desktop");
     NimBLEDevice::deleteAllBonds();
     sendAck("unpair");
+  } else if (strcmp(cmd, "usage") == 0) {
+    // Extension beyond the official protocol: real usage numbers from the
+    // local bridge. {"cmd":"usage","session_pct":33,"week_pct":12,"reset_in_min":178}
+    usage.fresh = true;
+    usage.lastMs = millis();
+    usage.sessionPct = d["session_pct"] | -1;
+    usage.weekPct = d["week_pct"] | -1;
+    usage.resetMin = d["reset_in_min"] | -1;
+    sendAck("usage");
   } else if (strcmp(cmd, "char_begin") == 0 || strcmp(cmd, "char_end") == 0
           || strcmp(cmd, "file") == 0       || strcmp(cmd, "chunk") == 0
           || strcmp(cmd, "file_end") == 0) {
@@ -868,6 +914,7 @@ void loop() {
 
   // Heartbeat freshness.
   if (hb.fresh && now - hb.lastMs > 30000) hb.fresh = false;
+  if (usage.fresh && now - usage.lastMs > 300000) usage.fresh = false;
 
   // IMU sampling runs unconditionally so we always know orientation and
   // can pick up shakes mid-prompt.
