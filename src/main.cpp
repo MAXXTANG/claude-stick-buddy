@@ -925,9 +925,10 @@ void loop() {
   if (bleConnectEdge) {
     bleConnectEdge = false;
     // Keep advertising while connected: scanners (the local usage bridge)
-    // can only discover us via adverts. macOS shares one physical link
-    // per peripheral across apps, so no second connection is created.
-    NimBLEDevice::startAdvertising();
+    // can only discover us via adverts. Needs a free connection slot
+    // (max 2) — NimBLE refuses connectable advertising at capacity.
+    bool readv = NimBLEDevice::startAdvertising();
+    Serial.printf("[ble] re-adv while connected: %s\n", readv ? "ok" : "FAILED");
     if (mode == UIMode::IdleDisconnected) {
       enterMode(UIMode::IdleSleeping);
       drawIdleGlance();
