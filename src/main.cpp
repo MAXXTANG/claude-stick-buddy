@@ -295,18 +295,33 @@ static void sendPermission(const char* decision) {
 }
 
 // ---- Drawing ----
+// UI text is Traditional Chinese; efontTW has full CJK coverage and lives
+// in flash (the 8MB part has room to spare). Font0/Font4 remain for tiny
+// ASCII/digit-only labels.
+#define FONT_UI  (&fonts::efontTW_12)
+#define FONT_BIG (&fonts::efontTW_24_b)
+
+// Truncate a UTF-8 string to at most n bytes without splitting a
+// multi-byte sequence (String::substring counts bytes, not glyphs).
+static String utf8Trunc(const String& s, unsigned n) {
+  if (s.length() <= n) return s;
+  unsigned i = n;
+  while (i > 0 && (s[i] & 0xC0) == 0x80) i--;
+  return s.substring(0, i);
+}
+
 static void drawPasskeyScreen(uint32_t pin) {
   auto& d = M5.Display;
   d.startWrite();
   d.fillScreen(TFT_BLACK);
-  d.setFont(&fonts::Font0);
+  d.setFont(FONT_UI);
   d.setTextSize(1);
   d.setTextDatum(top_center);
   d.setTextColor(TFT_WHITE, TFT_BLACK);
-  d.drawString("Pair this device", d.width() / 2, 14);
+  d.drawString("配對此裝置", d.width() / 2, 12);
   d.setTextColor(TFT_DARKGREY, TFT_BLACK);
-  d.drawString("Enter in Hardware", d.width() / 2, 28);
-  d.drawString("Buddy panel:",       d.width() / 2, 40);
+  d.drawString("在 Hardware Buddy", d.width() / 2, 28);
+  d.drawString("面板輸入此配對碼:",  d.width() / 2, 42);
 
   d.setFont(&fonts::Font4);
   d.setTextDatum(middle_center);
@@ -315,11 +330,11 @@ static void drawPasskeyScreen(uint32_t pin) {
   snprintf(buf, sizeof(buf), "%06u", (unsigned)pin);
   d.drawString(buf, d.width() / 2, d.height() / 2 + 10);
 
-  d.setFont(&fonts::Font0);
+  d.setFont(FONT_UI);
   d.setTextDatum(top_center);
   d.setTextColor(TFT_DARKGREY, TFT_BLACK);
-  d.drawString("Pair once; reconnects", d.width() / 2, d.height() - 24);
-  d.drawString("are automatic.",        d.width() / 2, d.height() - 12);
+  d.drawString("只需配對一次", d.width() / 2, d.height() - 30);
+  d.drawString("之後會自動重連", d.width() / 2, d.height() - 16);
   d.endWrite();
 }
 
@@ -379,13 +394,14 @@ static void drawIdleDisconnected() {
   d.drawString(deviceName.c_str(), 14, 4);
   drawBatteryCorner();
   d.drawFastHLine(0, 16, d.width(), TFT_DARKGREY);
+  d.setFont(FONT_UI);
   d.setTextColor(TFT_YELLOW);
-  d.drawString("Pairing...", 4, 28);
+  d.drawString("配對中...", 4, 26);
   if (muted) drawMuteBadge(d.width() - 18, 28);
   d.setTextColor(TFT_DARKGREY);
-  d.drawString("Open Hardware Buddy", 4, 50);
-  d.drawString("in Claude Desktop", 4, 62);
-  d.drawString("(Developer menu)", 4, 74);
+  d.drawString("請在 Claude Desktop", 4, 50);
+  d.drawString("開啟 Hardware Buddy", 4, 64);
+  d.drawString("(開發者選單)", 4, 78);
   d.endWrite();
 }
 
@@ -401,39 +417,39 @@ static void drawIdleGlance() {
   d.drawString(deviceName.c_str(), 14, 4);
   drawBatteryCorner();
   d.drawFastHLine(0, 16, d.width(), TFT_DARKGREY);
-  int y = 26;
+  d.setFont(FONT_UI);
+  int y = 24;
   d.setTextColor(TFT_GREEN);
-  d.drawString("Connected", 4, y);
+  d.drawString("已連線", 4, y);
   if (muted) drawMuteBadge(d.width() - 18, 26);
-  y += 14;
+  y += 16;
   if (hb.fresh) {
     d.setTextColor(TFT_CYAN);
-    char counts[40];
-    snprintf(counts, sizeof(counts), "T:%d  R:%d  W:%d", hb.total, hb.running, hb.waiting);
-    d.drawString(counts, 4, y); y += 14;
+    char counts[48];
+    snprintf(counts, sizeof(counts), "共%d 執行%d 等待%d", hb.total, hb.running, hb.waiting);
+    d.drawString(counts, 4, y); y += 16;
     if (hb.msg.length()) {
       d.setTextColor(TFT_WHITE);
-      d.drawString(hb.msg.substring(0, 22).c_str(), 4, y); y += 14;
+      d.drawString(utf8Trunc(hb.msg, 33).c_str(), 4, y); y += 16;
     }
     if (hb.tokens > 0) {
       d.setTextColor(TFT_DARKGREY);
       char tk[32];
       snprintf(tk, sizeof(tk), "tok %lu", (unsigned long)hb.tokens);
-      d.drawString(tk, 4, y); y += 14;
+      d.drawString(tk, 4, y); y += 16;
     }
   } else {
     d.setTextColor(TFT_DARKGREY);
-    d.drawString("Idle", 4, y);
+    d.drawString("待機中", 4, y);
   }
   // (battery moved to the top-right corner)
   // Stats footer
   d.setTextColor(TFT_DARKGREY, TFT_BLACK);
-  d.setFont(&fonts::Font0);
   d.setTextDatum(top_left);
-  char st[32];
-  snprintf(st, sizeof(st), "appr %lu  deny %lu",
+  char st[40];
+  snprintf(st, sizeof(st), "核准%lu 拒絕%lu",
            (unsigned long)statApprove, (unsigned long)statDeny);
-  d.drawString(st, 4, d.height() - 12);
+  d.drawString(st, 4, d.height() - 16);
   d.endWrite();
 }
 
@@ -451,14 +467,14 @@ static void drawPromptChrome(bool fullClear) {
   }
   {
     d.setTextDatum(top_left);
-    d.setFont(&fonts::Font0);
+    d.setFont(FONT_UI);
     d.setTextSize(1);
 
-    int yText = 4;
+    int yText = 2;
     d.setTextColor(TFT_WHITE, TFT_BLACK);
-    d.drawString(hb.promptTool.substring(0, 22).c_str(), 4, yText);
+    d.drawString(utf8Trunc(hb.promptTool, 33).c_str(), 4, yText);
     d.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-    d.drawString(hb.promptHint.substring(0, 22).c_str(), 4, yText + 12);
+    d.drawString(utf8Trunc(hb.promptHint, 33).c_str(), 4, yText + 14);
 
     // Two option pills, side by side
     const int pillY = 36, pillH = 28;
@@ -479,7 +495,7 @@ static void drawPromptChrome(bool fullClear) {
       d.setTextColor(TFT_DARKGREY, TFT_BLACK);
     }
     d.setTextDatum(middle_center);
-    d.drawString("Approve", x0 + pillW / 2, pillY + pillH / 2);
+    d.drawString("核准", x0 + pillW / 2, pillY + pillH / 2);
 
     // Deny pill (red)
     if (denyActive) {
@@ -490,7 +506,7 @@ static void drawPromptChrome(bool fullClear) {
       d.drawRoundRect(x1, pillY, pillW, pillH, 6, TFT_DARKGREY);
       d.setTextColor(TFT_DARKGREY, TFT_BLACK);
     }
-    d.drawString("Deny", x1 + pillW / 2, pillY + pillH / 2);
+    d.drawString("拒絕", x1 + pillW / 2, pillY + pillH / 2);
 
     // Footer hint, placed ~1/3 of the way down between the pills and the
     // GIF. Gives the buttons a bit of breathing room above and leaves the
@@ -499,7 +515,7 @@ static void drawPromptChrome(bool fullClear) {
     d.setTextColor(TFT_DARKGREY, TFT_BLACK);
     int gapTop = pillY + pillH;
     int gapH   = CHAR_REST_Y - gapTop;
-    d.drawString("B=cycle  A=confirm", 6, gapTop + gapH / 3);
+    d.drawString("B=切換  A=確認", 6, gapTop + gapH / 3);
   }
   d.endWrite();
 }
@@ -523,14 +539,14 @@ static void drawDecisionFeedback() {
   d.startWrite();
   d.fillScreen(bg);
   d.setTextDatum(middle_center);
-  d.setFont(&fonts::Font4);
+  d.setFont(FONT_BIG);
   d.setTextColor(TFT_WHITE, bg);
-  d.drawString(lastDecisionWasApprove ? "Approved" : "Denied",
-               d.width() / 2, d.height() / 2 - 12);
-  d.setFont(&fonts::Font0);
+  d.drawString(lastDecisionWasApprove ? "已核准" : "已拒絕",
+               d.width() / 2, d.height() / 2 - 14);
+  d.setFont(FONT_UI);
   d.setTextColor(fg, bg);
-  d.drawString(hb.promptTool.substring(0, 22).c_str(),
-               d.width() / 2, d.height() / 2 + 14);
+  d.drawString(utf8Trunc(hb.promptTool, 33).c_str(),
+               d.width() / 2, d.height() / 2 + 16);
   d.endWrite();
 }
 
