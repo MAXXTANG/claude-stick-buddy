@@ -14,6 +14,8 @@
 #include <esp_mac.h>
 #include <esp_system.h>
 #include <sys/time.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 #include "character_gif.h"
 #include "melody.h"
@@ -58,7 +60,13 @@ static volatile bool bleConnected = false;
 static volatile bool bleBonded = false;
 static volatile uint32_t pendingPasskey = 0;  // 6-digit code being shown
 static uint16_t bleMtu = 23;
-static String rxBuffer;
+// Inbound bytes are buffered by the BLE host task (RxCallbacks::onWrite)
+// and drained/parsed by the main loop (drainRx). ALL parsing side effects
+// (display, speaker, notify) MUST run on the main task — doing them in the
+// host callback corrupts memory / overflows the host stack (reset_reason=4).
+static SemaphoreHandle_t rxMux = nullptr;  // guards rxInbox
+static String rxInbox;                     // host task appends; loop drains
+static String rxAssembly;                  // main-task line reassembly
 
 // Edge flags set by BLE callbacks and drained by the main loop. We do
 // this because lgfx (display) and other M5 peripherals are NOT thread-
@@ -74,6 +82,7 @@ static Preferences prefs;
 static String deviceName = "Claude";
 static String ownerName;
 static uint32_t statApprove = 0, statDeny = 0;
+static bool muted = false;   // persistent chime mute (long-press B to toggle)
 
 // ---- IMU ----
 // Two behaviors:
@@ -313,53 +322,48 @@ static void drawPasskeyScreen(uint32_t pin) {
   d.endWrite();
 }
 
-// Centered battery icon + percentage. Anchor (cx, cy) is the center of
-// the icon; the percentage text sits below.
-static void drawBatteryWidget(int cx, int cy) {
+// Compact battery icon + % in the top-right corner (body ~18x9 + nub;
+// percentage right-aligned just to its left). Font0.
+static void drawBatteryCorner() {
   auto& d = M5.Display;
   int lvl = M5.Power.getBatteryLevel();
   bool charging = M5.Power.isCharging();
 
-  const int bw = 70, bh = 32;
-  const int nubW = 4, nubH = bh / 2;
-  int bx = cx - (bw + nubW) / 2;
-  int by = cy - bh / 2;
+  const int bw = 18, bh = 9, nubW = 2, nubH = 5;
+  int bx = d.width() - 2 - nubW - bw;   // 2px right margin + nub on the right
+  int by = 3;
 
-  // Outline (2 px stroke) and nub on the right
   d.drawRect(bx, by, bw, bh, TFT_LIGHTGREY);
-  d.drawRect(bx + 1, by + 1, bw - 2, bh - 2, TFT_LIGHTGREY);
   d.fillRect(bx + bw, by + (bh - nubH) / 2, nubW, nubH, TFT_LIGHTGREY);
 
-  // Fill color reflects level (or charging state)
   uint16_t color;
-  if (charging)        color = TFT_GREENYELLOW;
-  else if (lvl >= 30)  color = TFT_GREEN;
-  else if (lvl >= 15)  color = TFT_ORANGE;
-  else                 color = TFT_RED;
-
+  if (charging)       color = TFT_GREENYELLOW;
+  else if (lvl >= 30) color = TFT_GREEN;
+  else if (lvl >= 15) color = TFT_ORANGE;
+  else                color = TFT_RED;
   if (lvl > 0) {
-    int innerX = bx + 3, innerY = by + 3;
-    int innerW = bw - 6, innerH = bh - 6;
-    int fillW = innerW * lvl / 100;
-    if (fillW > 0) d.fillRect(innerX, innerY, fillW, innerH, color);
+    int fillW = (bw - 2) * lvl / 100;
+    if (fillW > 0) d.fillRect(bx + 1, by + 1, fillW, bh - 2, color);
   }
 
-  // Percentage in a bigger font, centered below the icon
   char buf[8];
   if (lvl >= 0) snprintf(buf, sizeof(buf), "%d%%", lvl);
   else          strcpy(buf, "--");
-  d.setFont(&fonts::Font4);
-  d.setTextDatum(top_center);
-  d.setTextColor(TFT_WHITE, TFT_BLACK);
-  d.drawString(buf, cx, by + bh + 6);
-
-  if (charging) {
-    d.setFont(&fonts::Font0);
-    d.setTextColor(TFT_GREENYELLOW, TFT_BLACK);
-    d.drawString("charging", cx, by + bh + 6 + 26);
-  }
   d.setFont(&fonts::Font0);
+  d.setTextDatum(top_right);
+  d.setTextColor(charging ? TFT_GREENYELLOW : TFT_WHITE, TFT_BLACK);
+  d.drawString(buf, bx - 3, by);
   d.setTextDatum(top_left);
+}
+
+// Small "muted" badge — a speaker with an X — drawn only when the user
+// has silenced the chime. Anchored top-left at (x, y), ~14x9.
+static void drawMuteBadge(int x, int y) {
+  auto& d = M5.Display;
+  d.fillRect(x, y + 2, 3, 5, TFT_RED);                       // speaker body
+  d.fillTriangle(x + 3, y + 1, x + 3, y + 8, x + 7, y + 4, TFT_RED);
+  d.drawLine(x + 9, y + 1, x + 13, y + 7, TFT_RED);          // X
+  d.drawLine(x + 13, y + 1, x + 9, y + 7, TFT_RED);
 }
 
 static void drawIdleDisconnected() {
@@ -370,16 +374,17 @@ static void drawIdleDisconnected() {
   d.setFont(&fonts::Font0);
   d.setTextSize(1);
   d.setTextColor(TFT_WHITE, TFT_BLACK);
-  d.drawString(deviceName.c_str(), 4, 4);
-  d.fillCircle(d.width() - 8, 8, 4, TFT_RED);
+  d.fillCircle(6, 8, 3, TFT_RED);
+  d.drawString(deviceName.c_str(), 14, 4);
+  drawBatteryCorner();
   d.drawFastHLine(0, 16, d.width(), TFT_DARKGREY);
   d.setTextColor(TFT_YELLOW);
   d.drawString("Pairing...", 4, 28);
+  if (muted) drawMuteBadge(d.width() - 18, 28);
   d.setTextColor(TFT_DARKGREY);
   d.drawString("Open Hardware Buddy", 4, 50);
   d.drawString("in Claude Desktop", 4, 62);
   d.drawString("(Developer menu)", 4, 74);
-  drawBatteryWidget(d.width() / 2, 150);
   d.endWrite();
 }
 
@@ -391,12 +396,15 @@ static void drawIdleGlance() {
   d.setFont(&fonts::Font0);
   d.setTextSize(1);
   d.setTextColor(TFT_WHITE, TFT_BLACK);
-  d.drawString(deviceName.c_str(), 4, 4);
-  d.fillCircle(d.width() - 8, 8, 4, TFT_GREEN);
+  d.fillCircle(6, 8, 3, TFT_GREEN);
+  d.drawString(deviceName.c_str(), 14, 4);
+  drawBatteryCorner();
   d.drawFastHLine(0, 16, d.width(), TFT_DARKGREY);
   int y = 26;
   d.setTextColor(TFT_GREEN);
-  d.drawString("Connected", 4, y); y += 14;
+  d.drawString("Connected", 4, y);
+  if (muted) drawMuteBadge(d.width() - 18, 26);
+  y += 14;
   if (hb.fresh) {
     d.setTextColor(TFT_CYAN);
     char counts[40];
@@ -416,8 +424,7 @@ static void drawIdleGlance() {
     d.setTextColor(TFT_DARKGREY);
     d.drawString("Idle", 4, y);
   }
-  // Battery widget in the empty middle area.
-  drawBatteryWidget(d.width() / 2, 150);
+  // (battery moved to the top-right corner)
   // Stats footer
   d.setTextColor(TFT_DARKGREY, TFT_BLACK);
   d.setFont(&fonts::Font0);
@@ -538,8 +545,9 @@ static void onPromptArrived() {
   activeChoice = Choice::Approve;  // friendlier default; tap A to accept
   startGifPlayback();
   drawPromptChrome(/*fullClear=*/true);
-  // Skip the audio chime if the user is already looking at the screen.
-  if (!faceUp) startMelody();
+  // Skip the audio chime if muted, or if the user is already looking at
+  // the screen (face-up).
+  if (!muted && !faceUp) startMelody();
   enterMode(UIMode::PromptActive);
 }
 
@@ -632,19 +640,41 @@ static void handleLine(const String& line) {
 
 // ---- BLE callbacks ----
 class RxCallbacks : public NimBLECharacteristicCallbacks {
+  // Runs on the NimBLE host task. Keep it a pure state-setter: append the
+  // raw bytes under the mutex and return immediately. drainRx() (main loop)
+  // does the newline-splitting and handleLine() dispatch, so all
+  // display/speaker/notify work happens on the main task.
   void onWrite(NimBLECharacteristic* c, NimBLEConnInfo& info) override {
     std::string v = c->getValue();
-    rxBuffer += String(v.c_str());
-    int nl;
-    while ((nl = rxBuffer.indexOf('\n')) >= 0) {
-      String line = rxBuffer.substring(0, nl);
-      rxBuffer.remove(0, nl + 1);
-      line.trim();
-      handleLine(line);
+    if (!rxMux) return;
+    if (xSemaphoreTake(rxMux, pdMS_TO_TICKS(50)) == pdTRUE) {
+      rxInbox += v.c_str();
+      if (rxInbox.length() > 65536) rxInbox = "";  // hard overflow guard
+      xSemaphoreGive(rxMux);
     }
-    if (rxBuffer.length() > 8192) rxBuffer = "";
   }
 };
+
+// Drains bytes buffered by the host task and processes complete lines on
+// the MAIN task. This is where handleLine() (and its display/speaker/notify
+// side effects) safely runs. Called every loop() iteration.
+static void drainRx() {
+  String chunk;
+  if (rxMux && xSemaphoreTake(rxMux, 0) == pdTRUE) {
+    if (rxInbox.length()) { chunk = rxInbox; rxInbox = ""; }
+    xSemaphoreGive(rxMux);
+  }
+  if (chunk.length() == 0) return;
+  rxAssembly += chunk;
+  int nl;
+  while ((nl = rxAssembly.indexOf('\n')) >= 0) {
+    String line = rxAssembly.substring(0, nl);
+    rxAssembly.remove(0, nl + 1);
+    line.trim();
+    handleLine(line);
+  }
+  if (rxAssembly.length() > 8192) rxAssembly = "";  // drop an oversized partial line
+}
 
 class ServerCallbacks : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer*, NimBLEConnInfo& info) override {
@@ -717,6 +747,7 @@ void setup() {
   ownerName = prefs.getString("owner", "");
   statApprove = prefs.getUInt("appr", 0);
   statDeny = prefs.getUInt("deny", 0);
+  muted = prefs.getBool("muted", false);
 
   gif.begin(GIF_PALETTE_RGB888);
 
@@ -725,6 +756,8 @@ void setup() {
   Serial.printf("[boot] %s ready (heap=%u) reset_reason=%d\n",
                 deviceName.c_str(), ESP.getFreeHeap(),
                 (int)esp_reset_reason());
+
+  rxMux = xSemaphoreCreateMutex();
 
   NimBLEDevice::init(deviceName.c_str());
   NimBLEDevice::setMTU(247);
@@ -819,9 +852,39 @@ void loop() {
     lastDrawnPasskey = 0;
   }
 
+  // Process any inbound BLE data on the MAIN task — this is where all the
+  // display / speaker / notify side effects safely happen (never in the
+  // host callback). This is the core fix for the reconnect panic loop.
+  drainRx();
+
   // Melody (alert chime) — runs independently of the UI state machine
   // so it can keep playing while the GIF animates.
   tickMelody();
+
+  // Long-press the side button (B) while idle toggles the chime mute.
+  // A consumed flag makes one long-press = one toggle; it clears on
+  // release. Guarded to idle modes so it never clashes with B=cycle
+  // during a prompt.
+  {
+    static bool btnBLongConsumed = false;
+    bool idle = (mode == UIMode::IdleSleeping || mode == UIMode::IdleGlancing
+                 || mode == UIMode::IdleDisconnected);
+    if (idle && M5.BtnB.pressedFor(1000)) {
+      if (!btnBLongConsumed) {
+        btnBLongConsumed = true;
+        muted = !muted;
+        prefs.putBool("muted", muted);
+        screenWake();
+        if (mode == UIMode::IdleDisconnected) {
+          drawIdleDisconnected();   // stay disconnected; just show the badge
+        } else {
+          drawIdleGlance();
+          enterMode(UIMode::IdleGlancing);
+        }
+      }
+    }
+    if (!M5.BtnB.isPressed()) btnBLongConsumed = false;
+  }
 
   switch (mode) {
     case UIMode::IdleDisconnected:
