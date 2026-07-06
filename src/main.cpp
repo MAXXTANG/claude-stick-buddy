@@ -44,6 +44,7 @@ struct Heartbeat {
   int total = 0, running = 0, waiting = 0;
   String msg;
   uint32_t tokens = 0;
+  uint32_t tokensToday = 0;
   bool promptActive = false;
   String promptId, promptTool, promptHint;
 };
@@ -239,6 +240,13 @@ static void screenWake() {
   M5.Display.setBrightness(120);
 }
 
+// Connected idle is "ambient", not dark: the mascot keeps animating at
+// low brightness. A button press bumps to full brightness for a glance.
+static void screenAmbient() {
+  M5.Display.wakeup();
+  M5.Display.setBrightness(40);
+}
+
 // ---- BLE TX ----
 static void notifyLine(const String& line) {
   if (!bleConnected || !txChar) return;
@@ -405,10 +413,42 @@ static void drawIdleDisconnected() {
   d.endWrite();
 }
 
+// The heartbeat carries raw token counts only (tokens = focused session,
+// tokens_today = daily total) — no rate-limit percentages — so the usage
+// bars scale against these budgets. Tune to taste.
+static constexpr uint32_t TOKEN_BUDGET_SESSION = 200000;
+static constexpr uint32_t TOKEN_BUDGET_DAILY   = 1000000;
+
+// One labelled usage bar: label left, % right, bar between.
+static void drawUsageBar(const char* label, uint32_t used, uint32_t budget, int y) {
+  auto& d = M5.Display;
+  unsigned pct = budget ? (unsigned)((uint64_t)used * 100 / budget) : 0;
+  if (pct > 999) pct = 999;
+  d.setFont(FONT_UI);
+  d.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  d.setTextDatum(top_left);
+  d.drawString(label, 4, y);
+  char pt[8];
+  snprintf(pt, sizeof(pt), "%u%%", pct);
+  d.setTextDatum(top_right);
+  d.drawString(pt, d.width() - 4, y);
+  d.setTextDatum(top_left);
+
+  const int bx = 32, bh = 8;
+  int bw = d.width() - bx - 34;
+  int by = y + 2;
+  uint16_t color = (pct < 60) ? TFT_GREEN : (pct < 85) ? TFT_ORANGE : TFT_RED;
+  d.drawRect(bx, by, bw, bh, TFT_DARKGREY);
+  int fillW = (int)((uint64_t)(bw - 2) * (pct > 100 ? 100 : pct) / 100);
+  if (fillW > 0) d.fillRect(bx + 1, by + 1, fillW, bh - 2, color);
+}
+
+// Idle/glance status. Repaints only the top half — the bottom 135px are
+// the mascot's slot, so the GIF keeps animating without a restart.
 static void drawIdleGlance() {
   auto& d = M5.Display;
   d.startWrite();
-  d.fillScreen(TFT_BLACK);
+  d.fillRect(0, 0, d.width(), CHAR_REST_Y, TFT_BLACK);
   d.setTextDatum(top_left);
   d.setFont(&fonts::Font0);
   d.setTextSize(1);
@@ -418,42 +458,26 @@ static void drawIdleGlance() {
   drawBatteryCorner();
   d.drawFastHLine(0, 16, d.width(), TFT_DARKGREY);
   d.setFont(FONT_UI);
-  int y = 24;
-  d.setTextColor(TFT_GREEN);
-  d.drawString("已連線", 4, y);
-  if (muted) drawMuteBadge(d.width() - 18, 26);
+  int y = 22;
+  d.setTextColor(hb.fresh ? TFT_GREEN : TFT_DARKGREY);
+  d.drawString(hb.fresh ? "已連線" : "待機中", 4, y);
+  if (muted) drawMuteBadge(d.width() - 18, y + 2);
   y += 16;
+  drawUsageBar("本次", hb.tokens, TOKEN_BUDGET_SESSION, y);      y += 16;
+  drawUsageBar("今日", hb.tokensToday, TOKEN_BUDGET_DAILY, y);   y += 16;
   if (hb.fresh) {
     d.setTextColor(TFT_CYAN);
     char counts[48];
     snprintf(counts, sizeof(counts), "共%d 執行%d 等待%d", hb.total, hb.running, hb.waiting);
     d.drawString(counts, 4, y); y += 16;
-    if (hb.msg.length()) {
-      d.setTextColor(TFT_WHITE);
-      d.drawString(utf8Trunc(hb.msg, 33).c_str(), 4, y); y += 16;
-    }
-    if (hb.tokens > 0) {
-      d.setTextColor(TFT_DARKGREY);
-      char tk[32];
-      snprintf(tk, sizeof(tk), "tok %lu", (unsigned long)hb.tokens);
-      d.drawString(tk, 4, y); y += 16;
-    }
-  } else {
-    d.setTextColor(TFT_DARKGREY);
-    d.drawString("待機中", 4, y);
-    y += 16;
   }
-  // (battery moved to the top-right corner)
-  // Stats line — kept in the top half; the bottom 135px belong to the
-  // character animation (started below), which repaints its whole slot.
   d.setTextColor(TFT_DARKGREY, TFT_BLACK);
-  d.setTextDatum(top_left);
   char st[40];
   snprintf(st, sizeof(st), "核准%lu 拒絕%lu",
            (unsigned long)statApprove, (unsigned long)statDeny);
   d.drawString(st, 4, y);
   d.endWrite();
-  startGifPlayback();   // mascot hangs out on the glance screen too
+  if (!gifOpen) startGifPlayback();   // mascot lives on the idle screen
 }
 
 // Chrome (text + pills + footer) lives in the top CHAR_REST_Y pixels,
@@ -576,9 +600,9 @@ static void onPromptCleared() {
   // independently. Drop back to idle if we were showing it.
   if (mode == UIMode::PromptRevealing || mode == UIMode::PromptActive) {
     stopMelody();
-    stopGifPlayback();
     enterMode(UIMode::IdleSleeping);
-    screenSleep();
+    drawIdleGlance();   // keeps the (already running) GIF, repaints the top
+    screenAmbient();
   }
 }
 
@@ -605,6 +629,7 @@ static void handleHeartbeat(JsonDocument& d) {
   hb.waiting = d["waiting"] | 0;
   hb.msg = (const char*)(d["msg"] | "");
   hb.tokens = d["tokens"] | 0;
+  hb.tokensToday = d["tokens_today"] | 0;
 
   bool wasActive = hb.promptActive;
   if (d["prompt"].is<JsonObject>()) {
@@ -836,7 +861,8 @@ void loop() {
     bleConnectEdge = false;
     if (mode == UIMode::IdleDisconnected) {
       enterMode(UIMode::IdleSleeping);
-      screenSleep();
+      drawIdleGlance();
+      screenAmbient();
     }
   }
   if (bleDisconnectEdge) {
@@ -850,10 +876,11 @@ void loop() {
   }
   if (bleAuthEdge) {
     bleAuthEdge = false;
-    // If we were showing the passkey screen, drop back to sleep.
+    // If we were showing the passkey screen, drop back to ambient idle.
     if (mode == UIMode::Pairing) {
       enterMode(UIMode::IdleSleeping);
-      screenSleep();
+      drawIdleGlance();
+      screenAmbient();
     }
   }
 
@@ -912,19 +939,28 @@ void loop() {
       // Stay until BLE connects.
       break;
 
-    case UIMode::IdleSleeping:
+    case UIMode::IdleSleeping: {
+      // Ambient idle: mascot animates at low brightness; the status area
+      // refreshes every few seconds so bars/counters track heartbeats.
       if (M5.BtnA.wasPressed() || M5.BtnB.wasPressed()) {
         screenWake();
         drawIdleGlance();
         enterMode(UIMode::IdleGlancing);
+      } else {
+        tickGifPlayback();
+        static uint32_t lastStatusMs = 0;
+        if (now - lastStatusMs > 5000) {
+          lastStatusMs = now;
+          drawIdleGlance();
+        }
       }
       break;
+    }
 
     case UIMode::IdleGlancing:
-      // Auto-sleep after 6s, or any second press dismisses.
+      // Drop back to ambient brightness after 6s; the mascot keeps going.
       if (now - modeEnteredMs > 6000) {
-        stopGifPlayback();
-        screenSleep();
+        screenAmbient();
         enterMode(UIMode::IdleSleeping);
       } else {
         tickGifPlayback();
@@ -963,8 +999,9 @@ void loop() {
 
     case UIMode::DecisionFeedback:
       if (now - modeEnteredMs > 900) {
-        screenSleep();
         enterMode(UIMode::IdleSleeping);
+        drawIdleGlance();
+        screenAmbient();
       }
       break;
   }
