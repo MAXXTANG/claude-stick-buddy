@@ -111,9 +111,11 @@ async def send_ble(payload: str) -> None:
 
 
 async def run(once: bool) -> int:
-    token = get_access_token()
     while True:
         try:
+            # Re-read every cycle: Claude Code refreshes the ~60-min token
+            # in the Keychain while it is active.
+            token = get_access_token()
             raw = fetch_usage(token)
             if once:
                 print("raw response:", json.dumps(raw, indent=2)[:2000])
