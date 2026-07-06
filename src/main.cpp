@@ -199,13 +199,31 @@ static void GIFDraw(GIFDRAW *pDraw) {
   }
 }
 
-static void startGifPlayback() {
+// Picks the next animation at weighted random — idle dominates, the
+// special actions (heart / bulb / dizzy eyes) sprinkle in between.
+static const CharGif& pickCharGif() {
+  uint32_t totalW = 0;
+  for (size_t i = 0; i < CHAR_GIF_COUNT; i++) totalW += CHAR_GIFS[i].weight;
+  uint32_t r = esp_random() % totalW;
+  for (size_t i = 0; i < CHAR_GIF_COUNT; i++) {
+    if (r < CHAR_GIFS[i].weight) return CHAR_GIFS[i];
+    r -= CHAR_GIFS[i].weight;
+  }
+  return CHAR_GIFS[0];
+}
+
+static void startGifPlayback(bool clearSlot = true) {
   if (gifOpen) gif.close();
-  // Clear the slot the GIF will draw into — the library only paints
-  // pixels it changes, so any leftover content shows through.
-  int xOrigin = (M5.Display.width() - CHAR_W) / 2;
-  M5.Display.fillRect(xOrigin, CHAR_REST_Y, CHAR_W, CHAR_H, TFT_BLACK);
-  gifOpen = gif.open((uint8_t*)char_gif, CHAR_GIF_LEN, GIFDraw);
+  if (clearSlot) {
+    // Clear the slot the GIF will draw into — the library only paints
+    // pixels it changes, so any leftover content shows through. Skipped
+    // on animation-to-animation switches (every frame repaints fully)
+    // to avoid a black flash.
+    int xOrigin = (M5.Display.width() - CHAR_W) / 2;
+    M5.Display.fillRect(xOrigin, CHAR_REST_Y, CHAR_W, CHAR_H, TFT_BLACK);
+  }
+  const CharGif& g = pickCharGif();
+  gifOpen = gif.open((uint8_t*)g.data, g.len, GIFDraw);
   gifNextFrameMs = millis();
 }
 
@@ -556,7 +574,7 @@ static void tickGifPlayback() {
   int frameDelay = 0;
   int more = gif.playFrame(false, &frameDelay);
   gifNextFrameMs = now + (frameDelay > 0 ? frameDelay : 80);
-  if (more == 0) gif.reset();
+  if (more == 0) startGifPlayback(/*clearSlot=*/false);  // next random action
 }
 
 static void drawDecisionFeedback() {
