@@ -924,6 +924,10 @@ void loop() {
   // / advertising / mode work here, on the main thread.
   if (bleConnectEdge) {
     bleConnectEdge = false;
+    // Keep advertising while connected: scanners (the local usage bridge)
+    // can only discover us via adverts. macOS shares one physical link
+    // per peripheral across apps, so no second connection is created.
+    NimBLEDevice::startAdvertising();
     if (mode == UIMode::IdleDisconnected) {
       enterMode(UIMode::IdleSleeping);
       drawIdleGlance();
