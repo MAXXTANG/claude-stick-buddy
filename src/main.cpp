@@ -441,16 +441,19 @@ static void drawIdleGlance() {
   } else {
     d.setTextColor(TFT_DARKGREY);
     d.drawString("待機中", 4, y);
+    y += 16;
   }
   // (battery moved to the top-right corner)
-  // Stats footer
+  // Stats line — kept in the top half; the bottom 135px belong to the
+  // character animation (started below), which repaints its whole slot.
   d.setTextColor(TFT_DARKGREY, TFT_BLACK);
   d.setTextDatum(top_left);
   char st[40];
   snprintf(st, sizeof(st), "核准%lu 拒絕%lu",
            (unsigned long)statApprove, (unsigned long)statDeny);
-  d.drawString(st, 4, d.height() - 16);
+  d.drawString(st, 4, y);
   d.endWrite();
+  startGifPlayback();   // mascot hangs out on the glance screen too
 }
 
 // Chrome (text + pills + footer) lives in the top CHAR_REST_Y pixels,
@@ -920,8 +923,11 @@ void loop() {
     case UIMode::IdleGlancing:
       // Auto-sleep after 6s, or any second press dismisses.
       if (now - modeEnteredMs > 6000) {
+        stopGifPlayback();
         screenSleep();
         enterMode(UIMode::IdleSleeping);
+      } else {
+        tickGifPlayback();
       }
       break;
 
