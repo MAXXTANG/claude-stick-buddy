@@ -671,6 +671,7 @@ static void drainRx() {
     String line = rxAssembly.substring(0, nl);
     rxAssembly.remove(0, nl + 1);
     line.trim();
+    Serial.printf("[rx] %s\n", line.c_str());
     handleLine(line);
   }
   if (rxAssembly.length() > 8192) rxAssembly = "";  // drop an oversized partial line
