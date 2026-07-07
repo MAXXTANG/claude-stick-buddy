@@ -1,4 +1,23 @@
-# hwbuddy-notifier-S3
+# claude-stick-buddy
+
+> Fork of [p3ob7o/hwbuddy-notifier-S3](https://github.com/p3ob7o/hwbuddy-notifier-S3)
+> (GPL-3.0). What this fork adds:
+>
+> - **Reconnect-crash fix** — BLE rx parsing moved off the NimBLE host task
+>   (mutex inbox drained on the main loop); bonded reconnects no longer panic.
+> - **Traditional Chinese UI** (efontTW, UTF-8-safe truncation) — 介面全中文。
+> - **Clawd-style pixel mascot** with a random animation set: idle
+>   blink/wander, heart, lightbulb, dizzy spiral eyes
+>   (`tools/make_clawd_gif.py` generates `src/character_gif.h` directly).
+> - **Ambient idle** — the mascot stays animated at low brightness instead of
+>   the screen sleeping; button press = full-brightness glance.
+> - **Real rate-limit usage on screen** (Current session % / Weekly % / reset
+>   countdown): `tools/usage_bridge.py` polls the local Claude OAuth usage
+>   endpoint and pushes a `{"cmd":"usage"}` extension message over the shared
+>   macOS BLE link. Run it with launchd for set-and-forget updates. Set
+>   `DEVICE_NAME` to your device's `Claude-XXXX` name first.
+> - Corner battery gauge, persistent chime mute (long-press B in idle), and
+>   `[rx]`/`[tx]`/`[btn]` serial logging for protocol debugging.
 
 A hardware buddy for [Claude Desktop](https://claude.ai/download) that runs on
 the [M5Stack M5StickS3](https://shop.m5stack.com/products/m5sticks3-esp32s3-mini-iot-dev-kit).
