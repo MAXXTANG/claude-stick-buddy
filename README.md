@@ -19,6 +19,8 @@
 > - Corner battery gauge, persistent chime mute (long-press B in idle), and
 >   `[rx]`/`[tx]`/`[btn]` serial logging for protocol debugging.
 
+![Clawd mascot random animation system](docs/clawd-animation-system.svg)
+
 A hardware buddy for [Claude Desktop](https://claude.ai/download) that runs on
 the [M5Stack M5StickS3](https://shop.m5stack.com/products/m5sticks3-esp32s3-mini-iot-dev-kit).
 Pairs with Claude Desktop's Hardware Buddy panel over Bluetooth LE and surfaces
