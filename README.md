@@ -2,6 +2,8 @@
 
 ![Claude Stick Buddy cover](docs/behance-cover.png)
 
+Behance project assets: [5-page deck](docs/behance-project.md) (`docs/behance-01-cover.png` through `docs/behance-05-mascot.png`).
+
 > Fork of [p3ob7o/hwbuddy-notifier-S3](https://github.com/p3ob7o/hwbuddy-notifier-S3)
 > (GPL-3.0). What this fork adds:
 >
