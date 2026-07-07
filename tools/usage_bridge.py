@@ -78,26 +78,37 @@ def minutes_until(iso_ts: str) -> int:
     return max(0, int(delta.total_seconds() // 60))
 
 
-def as_pct(v) -> int:
-    """utilization arrives as 0-100 or 0-1 depending on account/version."""
-    f = float(v)
-    return round(f * 100) if f <= 1.0 else round(f)
-
-
 def extract(raw: dict) -> dict:
-    """Map the endpoint response to the device message. Shape per
-    Claude-Code-Usage-Monitor: five_hour/seven_day {utilization,
-    resets_at}, sometimes nested under rate_limits."""
-    root = raw.get("rate_limits") or raw
+    """Map the endpoint response to the device message.
+
+    Preferred source is the limits[] array (clean integer percents,
+    observed live: kind=session / weekly_all / weekly_scoped); falls
+    back to five_hour/seven_day utilization, which is 0-100 scale.
+    Returns just {"cmd":"usage"} when the endpoint hands back an empty
+    snapshot (all zero, resets_at null) — occasionally happens right
+    after a token refresh; the caller skips sending those."""
     msg = {"cmd": "usage"}
-    five = root.get("five_hour") or {}
-    week = root.get("seven_day") or {}
-    if five.get("utilization") is not None:
-        msg["session_pct"] = as_pct(five["utilization"])
-    if week.get("utilization") is not None:
-        msg["week_pct"] = as_pct(week["utilization"])
-    if five.get("resets_at"):
-        msg["reset_in_min"] = minutes_until(five["resets_at"])
+    for lim in raw.get("limits") or []:
+        kind = lim.get("kind")
+        if kind == "session":
+            msg["session_pct"] = int(lim.get("percent") or 0)
+            if lim.get("resets_at"):
+                msg["reset_in_min"] = minutes_until(lim["resets_at"])
+        elif kind == "weekly_all":
+            msg["week_pct"] = int(lim.get("percent") or 0)
+    if "session_pct" not in msg or "week_pct" not in msg:
+        five = raw.get("five_hour") or {}
+        week = raw.get("seven_day") or {}
+        if "session_pct" not in msg and five.get("utilization") is not None:
+            msg["session_pct"] = round(float(five["utilization"]))  # 0-100 scale
+        if "week_pct" not in msg and week.get("utilization") is not None:
+            msg["week_pct"] = round(float(week["utilization"]))
+        if "reset_in_min" not in msg and five.get("resets_at"):
+            msg["reset_in_min"] = minutes_until(five["resets_at"])
+    # Empty snapshot: nothing non-zero and no reset clock -> not worth sending.
+    if (msg.get("session_pct", 0) == 0 and msg.get("week_pct", 0) == 0
+            and "reset_in_min" not in msg):
+        return {"cmd": "usage"}
     return msg
 
 
@@ -121,9 +132,12 @@ async def run(once: bool) -> int:
                 print("raw response:", json.dumps(raw, indent=2)[:2000])
             msg = extract(raw)
             if len(msg) == 1:
-                print("no recognized usage fields — see raw dump; extract() needs adjusting",
+                print("empty usage snapshot — skipped (device keeps last data)",
                       file=sys.stderr)
-                return 1
+                if once:
+                    return 1
+                await asyncio.sleep(INTERVAL_S)
+                continue
             payload = json.dumps(msg)
             await send_ble(payload)
             print(f"sent: {payload}")
