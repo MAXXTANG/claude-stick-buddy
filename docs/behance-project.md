@@ -26,7 +26,7 @@ Firmware design、Embedded UI、BLE protocol integration、Python local bridge�
 
 ### 01. Cover
 
-File: `docs/behance-01-cover.png`
+File: `docs/behance-cover-safe.png`
 
 Caption:
 Claude Stick Buddy is a pocket hardware companion for Claude Desktop, turning permission prompts into a physical desk interaction.
